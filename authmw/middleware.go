@@ -25,7 +25,7 @@ const (
 // AccessTokenParser verifies an access token string and returns the user
 // ID it was issued for. Satisfied by *Verifier.
 type AccessTokenParser interface {
-	Parse(token string) (uuid.UUID, error)
+	Parse(ctx context.Context, token string) (uuid.UUID, error)
 }
 
 // RequireAuth returns middleware that rejects requests without a valid
@@ -40,7 +40,7 @@ func RequireAuth(parser AccessTokenParser) func(http.Handler) http.Handler {
 				return
 			}
 
-			userID, err := parser.Parse(token)
+			userID, err := parser.Parse(r.Context(), token)
 			if err != nil {
 				httpx.WriteError(w, http.StatusUnauthorized, CodeInvalidAccessToken, "invalid or expired access token")
 				return

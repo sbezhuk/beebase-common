@@ -25,35 +25,48 @@ import (
 // shouldn't act on) the distinction between those cases.
 var ErrInvalidToken = errors.New("invalid access token")
 
+// SessionChecker reports whether sessionID is still the active session for
+// userID. Satisfied by *sessionstore.Store; kept as a narrow interface
+// here so authmw doesn't need to depend on Redis directly.
+type SessionChecker interface {
+	IsActive(ctx context.Context, userID, sessionID uuid.UUID) (bool, error)
+}
+
 // Verifier checks access tokens signed by auth-service.
 type Verifier struct {
-	keyfunc jwt.Keyfunc
+	keyfunc  jwt.Keyfunc
+	sessions SessionChecker
 }
 
 // NewVerifierFromJWKSURL fetches and caches auth-service's public key from
 // its JWKS endpoint (conventionally GET /.well-known/jwks.json), refreshing
 // it in the background so a future key rotation on auth-service doesn't
-// require restarting this service.
-func NewVerifierFromJWKSURL(ctx context.Context, jwksURL string) (*Verifier, error) {
+// require restarting this service. sessions is consulted on every Parse
+// call so a token superseded by a newer session is rejected immediately,
+// rather than staying valid until its own expiry.
+func NewVerifierFromJWKSURL(ctx context.Context, jwksURL string, sessions SessionChecker) (*Verifier, error) {
 	kf, err := keyfunc.NewDefaultCtx(ctx, []string{jwksURL})
 	if err != nil {
 		return nil, fmt.Errorf("authmw: build JWKS client for %s: %w", jwksURL, err)
 	}
-	return &Verifier{keyfunc: kf.Keyfunc}, nil
+	return &Verifier{keyfunc: kf.Keyfunc, sessions: sessions}, nil
 }
 
 // NewVerifierFromPublicKey builds a Verifier directly from a known public
 // key, with no network access. Intended for auth-service to verify the
-// tokens it issues itself.
-func NewVerifierFromPublicKey(pub ed25519.PublicKey) *Verifier {
+// tokens it issues itself. See NewVerifierFromJWKSURL for sessions.
+func NewVerifierFromPublicKey(pub ed25519.PublicKey, sessions SessionChecker) *Verifier {
 	return &Verifier{
-		keyfunc: func(*jwt.Token) (any, error) { return pub, nil },
+		keyfunc:  func(*jwt.Token) (any, error) { return pub, nil },
+		sessions: sessions,
 	}
 }
 
-// Parse verifies tokenString and returns the user ID it was issued for.
-func (v *Verifier) Parse(tokenString string) (uuid.UUID, error) {
-	var claims jwt.RegisteredClaims
+// Parse verifies tokenString - signature, expiry, and that the session it
+// was issued for is still the user's active one - and returns the user ID
+// it was issued for.
+func (v *Verifier) Parse(ctx context.Context, tokenString string) (uuid.UUID, error) {
+	var claims AccessClaims
 
 	_, err := jwt.ParseWithClaims(tokenString, &claims, v.keyfunc, jwt.WithValidMethods([]string{"EdDSA"}))
 	if err != nil {
@@ -62,6 +75,11 @@ func (v *Verifier) Parse(tokenString string) (uuid.UUID, error) {
 
 	userID, err := uuid.Parse(claims.Subject)
 	if err != nil {
+		return uuid.Nil, ErrInvalidToken
+	}
+
+	active, err := v.sessions.IsActive(ctx, userID, claims.SessionID)
+	if err != nil || !active {
 		return uuid.Nil, ErrInvalidToken
 	}
 
