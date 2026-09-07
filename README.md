@@ -6,12 +6,12 @@ beebase-apiary-service, beebase-hive-service, beebase-inspection-service,
 beebase-gateway).
 
 - `logger` — slog setup (JSON in production, text in development)
-- `httpx` — JSON response/error helpers with a consistent `{"error": {"code", "message"}}` shape
+- `httpx`  — JSON response/error helpers with a consistent `{"error": {"code", "message"}}` shape
 - `server` — `http.Server` wrapper with graceful shutdown
 - `authmw` — verifies EdDSA-signed access tokens (fetched live from a
   service's JWKS endpoint, or held directly for the issuing service itself)
   and the `RequireAuth` HTTP middleware built on it
-- `jwks` — serves a public key as a JSON Web Key Set; used only by
+- `jwks`   — serves a public key as a JSON Web Key Set; used only by
   auth-service, which is the only service holding a private key
 
 ## Trust model
