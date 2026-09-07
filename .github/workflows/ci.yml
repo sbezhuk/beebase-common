@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  code-quality-and-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
