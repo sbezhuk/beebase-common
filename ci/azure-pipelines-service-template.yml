@@ -1,0 +1,162 @@
+# Shared Azure Pipelines template for every BeeBase service. Each
+# service repo's own azure-pipelines.yml extends this with just its own
+# name and whether it ships database migrations - see e.g.
+# beebase-auth-service/azure-pipelines.yml.
+#
+# Requires the "AWS Toolkit for Azure DevOps" marketplace extension and
+# an AWS service connection configured for OIDC/workload-identity
+# federation (no long-lived AWS access keys stored in Azure DevOps) -
+# see the deployment report's "Azure DevOps configuration required"
+# section for the one-time setup.
+
+parameters:
+  - name: serviceName # must match the ECR repository name, e.g. "beebase-auth-service"
+    type: string
+  - name: hasMigrations # true for the 5 database-backed services
+    type: boolean
+    default: false
+  - name: awsServiceConnection
+    type: string
+    default: "AWS-BeeBase-OIDC"
+
+trigger:
+  branches:
+    include: [main]
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: beebase-prod-pipeline # AWS_REGION, AWS_ACCOUNT_ID, EC2_INSTANCE_ID - see deployment report
+  - name: imageTag
+    value: $(Build.SourceVersion) # full 40-char Git commit SHA - immutable, never "latest"
+
+stages:
+  # --- Test ---
+
+  - stage: Test
+    jobs:
+      - job: GoTestAndVet
+        steps:
+          - task: GoTool@0
+            inputs:
+              version: "1.27"
+          - script: |
+              set -euo pipefail
+              go vet ./...
+              go test ./...
+            displayName: "go vet && go test"
+
+  # --- Build & push immutable images to ECR ---
+
+  - stage: Build
+    dependsOn: Test
+    jobs:
+      - job: BuildAndPush
+        steps:
+          - script: |
+              set -euo pipefail
+              # QEMU user-mode emulation for the arm64 runtime stage's
+              # `apk add` step; the Go build stage itself cross-compiles
+              # natively via TARGETOS/TARGETARCH, no emulation needed for it.
+              docker run --rm --privileged tonistiigi/binfmt --install arm64
+              # Microsoft-hosted agents are fresh VMs per job, so this
+              # never collides in practice; the fallback only matters on
+              # a self-hosted/reused agent where the builder persists.
+              docker buildx create --use --name beebase-builder || docker buildx use beebase-builder
+            displayName: "Set up buildx + QEMU for linux/arm64"
+
+          - task: AWSShellScript@1
+            inputs:
+              awsCredentials: "${{ parameters.awsServiceConnection }}"
+              regionName: "$(AWS_REGION)"
+              scriptType: "inline"
+              inlineScript: |
+                set -euo pipefail
+                aws ecr get-login-password --region "$(AWS_REGION)" \
+                  | docker login --username AWS --password-stdin "$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com"
+            displayName: "Authenticate to ECR"
+
+          - script: |
+              set -euo pipefail
+              REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/${{ parameters.serviceName }}"
+              docker buildx build \
+                --platform linux/arm64 \
+                --tag "${REPO}:$(imageTag)" \
+                --push \
+                .
+            displayName: "Build & push app image (linux/arm64, tag=$(imageTag))"
+
+          - ${{ if eq(parameters.hasMigrations, true) }}:
+              - script: |
+                  set -euo pipefail
+                  REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/${{ parameters.serviceName }}"
+                  docker buildx build \
+                    --platform linux/arm64 \
+                    --tag "${REPO}:$(imageTag)-migrate" \
+                    --push \
+                    -f Dockerfile.migrate \
+                    .
+                displayName: "Build & push migrate image (tag=$(imageTag)-migrate)"
+
+  # --- Deploy: trigger the host to pull and run the new tag ---
+
+  - stage: Deploy
+    dependsOn: Build
+    jobs:
+      - deployment: DeployToEC2
+        environment: "beebase-production" # gives this stage a manual-approval gate in Azure DevOps Environments
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AWSShellScript@1
+                  inputs:
+                    awsCredentials: "${{ parameters.awsServiceConnection }}"
+                    regionName: "$(AWS_REGION)"
+                    scriptType: "inline"
+                    inlineScript: |
+                      set -euo pipefail
+
+                      COMMAND_ID=$(aws ssm send-command \
+                        --instance-ids "$(EC2_INSTANCE_ID)" \
+                        --document-name "AWS-RunShellScript" \
+                        --comment "Deploy ${{ parameters.serviceName }} $(imageTag)" \
+                        --parameters commands="/opt/beebase/deploy/deploy.sh $(imageTag)" \
+                        --query "Command.CommandId" --output text)
+
+                      echo "SSM command: ${COMMAND_ID}"
+
+                      # Poll until the command finishes - deploy.sh itself
+                      # runs the full stack + health checks + smoke test,
+                      # so this is the single gate the whole deploy hangs on.
+                      for i in $(seq 1 60); do
+                        STATUS=$(aws ssm get-command-invocation \
+                          --command-id "${COMMAND_ID}" \
+                          --instance-id "$(EC2_INSTANCE_ID)" \
+                          --query "Status" --output text 2>/dev/null || echo "Pending")
+                        case "${STATUS}" in
+                          Success) break ;;
+                          Failed|Cancelled|TimedOut)
+                            echo "Deploy failed with status: ${STATUS}" >&2
+                            aws ssm get-command-invocation \
+                              --command-id "${COMMAND_ID}" \
+                              --instance-id "$(EC2_INSTANCE_ID)" \
+                              --query "StandardErrorContent" --output text >&2
+                            exit 1
+                            ;;
+                          *) sleep 10 ;;
+                        esac
+                      done
+
+                      if [ "${STATUS}" != "Success" ]; then
+                        echo "Deploy did not finish within the timeout" >&2
+                        exit 1
+                      fi
+
+                      echo "--- deploy.sh output ---"
+                      aws ssm get-command-invocation \
+                        --command-id "${COMMAND_ID}" \
+                        --instance-id "$(EC2_INSTANCE_ID)" \
+                        --query "StandardOutputContent" --output text
+                  displayName: "Deploy ${{ parameters.serviceName }} $(imageTag) via SSM"
