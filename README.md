@@ -13,6 +13,10 @@ beebase-gateway).
   and the `RequireAuth` HTTP middleware built on it
 - `jwks`    — serves a public key as a JSON Web Key Set; used only by
   auth-service, which is the only service holding a private key
+- `inspectionwarning` — the single, shared "needs inspection" rule
+  (never inspected, or latest inspection older than a configured
+  threshold) and its default (14 days), so inspection-service,
+  hive-service, and statistics-service always compute the same answer
 
 ## Trust model
 
