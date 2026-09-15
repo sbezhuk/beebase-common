@@ -78,9 +78,9 @@ type Meta struct {
 	Page        int  `json:"page"`
 	Limit       int  `json:"limit"`
 	Total       int  `json:"total"`
-	TotalPages  int  `json:"total_pages"`
-	HasNext     bool `json:"has_next"`
-	HasPrevious bool `json:"has_previous"`
+	TotalPages  int  `json:"totalPages"`
+	HasNext     bool `json:"hasNext"`
+	HasPrevious bool `json:"hasPrevious"`
 }
 
 // NewMeta builds the metadata for a page of total total rows requested
