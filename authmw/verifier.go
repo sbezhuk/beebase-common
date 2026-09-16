@@ -66,22 +66,33 @@ func NewVerifierFromPublicKey(pub ed25519.PublicKey, sessions SessionChecker) *V
 // was issued for is still the user's active one - and returns the user ID
 // it was issued for.
 func (v *Verifier) Parse(ctx context.Context, tokenString string) (uuid.UUID, error) {
+	userID, _, err := v.ParseSession(ctx, tokenString)
+	return userID, err
+}
+
+// ParseSession verifies tokenString and returns both its user and session IDs.
+func (v *Verifier) ParseSession(ctx context.Context, tokenString string) (uuid.UUID, uuid.UUID, error) {
+	userID, sessionID, _, err := v.ParseSessionWithGeneration(ctx, tokenString)
+	return userID, sessionID, err
+}
+
+func (v *Verifier) ParseSessionWithGeneration(ctx context.Context, tokenString string) (uuid.UUID, uuid.UUID, int64, error) {
 	var claims AccessClaims
 
 	_, err := jwt.ParseWithClaims(tokenString, &claims, v.keyfunc, jwt.WithValidMethods([]string{"EdDSA"}))
 	if err != nil {
-		return uuid.Nil, ErrInvalidToken
+		return uuid.Nil, uuid.Nil, 0, ErrInvalidToken
 	}
 
 	userID, err := uuid.Parse(claims.Subject)
 	if err != nil {
-		return uuid.Nil, ErrInvalidToken
+		return uuid.Nil, uuid.Nil, 0, ErrInvalidToken
 	}
 
 	active, err := v.sessions.IsActive(ctx, userID, claims.SessionID)
 	if err != nil || !active {
-		return uuid.Nil, ErrInvalidToken
+		return uuid.Nil, uuid.Nil, 0, ErrInvalidToken
 	}
 
-	return userID, nil
+	return userID, claims.SessionID, claims.SessionGeneration, nil
 }

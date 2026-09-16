@@ -12,5 +12,6 @@ import (
 // without waiting for the token's own expiry.
 type AccessClaims struct {
 	jwt.RegisteredClaims
-	SessionID uuid.UUID `json:"sid"`
+	SessionID         uuid.UUID `json:"sid"`
+	SessionGeneration int64     `json:"sg"`
 }

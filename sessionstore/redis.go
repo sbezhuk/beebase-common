@@ -52,6 +52,47 @@ func (s *Store) Activate(ctx context.Context, userID, sessionID uuid.UUID, ttl t
 	return nil
 }
 
+// ActivateAndReturnPrevious atomically replaces the active session and
+// returns the session it superseded, if any.
+func (s *Store) ActivateAndReturnPrevious(ctx context.Context, userID, sessionID uuid.UUID, ttl time.Duration) (uuid.UUID, bool, error) {
+	previous, hadPrevious, _, err := s.ActivateAndReturnPreviousWithGeneration(ctx, userID, sessionID, ttl)
+	return previous, hadPrevious, err
+}
+
+func (s *Store) ActivateAndReturnPreviousWithGeneration(ctx context.Context, userID, sessionID uuid.UUID, ttl time.Duration) (uuid.UUID, bool, int64, error) {
+	const script = `local old = redis.call('GET', KEYS[1]); local generation = redis.call('INCR', KEYS[2]); redis.call('PEXPIRE', KEYS[2], ARGV[2]); redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2]); return {old or '', generation}`
+	result, err := s.client.Eval(ctx, script, []string{activeSessionKey(userID), sessionGenerationKey(userID)}, sessionID.String(), ttl.Milliseconds()).Result()
+	if err != nil {
+		return uuid.Nil, false, 0, fmt.Errorf("sessionstore: activate session for user %s: %w", userID, err)
+	}
+	values, ok := result.([]any)
+	if !ok || len(values) != 2 {
+		return uuid.Nil, false, 0, fmt.Errorf("sessionstore: invalid activation result")
+	}
+	oldString, _ := values[0].(string)
+	generation, ok := values[1].(int64)
+	if !ok {
+		return uuid.Nil, false, 0, fmt.Errorf("sessionstore: invalid session generation")
+	}
+	if oldString == "" {
+		return uuid.Nil, false, generation, nil
+	}
+	previous, err := uuid.Parse(oldString)
+	if err != nil {
+		return uuid.Nil, false, generation, nil
+	}
+	return previous, true, generation, nil
+}
+
+func (s *Store) DeactivateIfCurrent(ctx context.Context, userID, sessionID uuid.UUID) (bool, error) {
+	const script = `if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end`
+	result, err := s.client.Eval(ctx, script, []string{activeSessionKey(userID)}, sessionID.String()).Int64()
+	if err != nil {
+		return false, fmt.Errorf("sessionstore: deactivate session for user %s: %w", userID, err)
+	}
+	return result == 1, nil
+}
+
 // IsActive reports whether sessionID is still the active session for
 // userID. It returns false, with no error, once the marker has expired or
 // was never set - callers should treat that the same as "not active", not
@@ -80,4 +121,8 @@ func (s *Store) Deactivate(ctx context.Context, userID uuid.UUID) error {
 
 func activeSessionKey(userID uuid.UUID) string {
 	return "session:active:" + userID.String()
+}
+
+func sessionGenerationKey(userID uuid.UUID) string {
+	return "session:generation:" + userID.String()
 }
