@@ -3,7 +3,8 @@
 Shared Go packages used by every BeeBase microservice
 ([beebase-auth-service](https://github.com/sbezhuk/beebase-auth-service),
 beebase-apiary-service, beebase-hive-service, beebase-inspection-service,
-beebase-gateway).
+beebase-harvest-service, beebase-media-service, beebase-statistics-service,
+beebase-subscription-service, beebase-notification-service, beebase-gateway).
 
 - `logger` — slog setup (JSON in production, text in development)
 - `httpx`  — JSON response/error helpers with a consistent `{"error": {"code", "message"}}` shape
@@ -11,6 +12,8 @@ beebase-gateway).
 - `authmw` — verifies EdDSA-signed access tokens (fetched live from a
   service's JWKS endpoint, or held directly for the issuing service itself)
   and the `RequireAuth` HTTP middleware built on it
+- `sessionstore` — Redis-backed active-session markers and atomic session
+  generations, allowing services to reject superseded access tokens
 - `jwks`   — serves a public key as a JSON Web Key Set; used only by
   auth-service, which is the only service holding a private key
 - `inspectionwarning` — the single, shared "needs inspection" rule
