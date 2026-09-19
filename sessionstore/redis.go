@@ -93,6 +93,53 @@ func (s *Store) DeactivateIfCurrent(ctx context.Context, userID, sessionID uuid.
 	return result == 1, nil
 }
 
+// DeactivateAndReturnPrevious atomically clears userID's active-session
+// marker and reports which session, if any, was actually removed. A
+// caller that needs both to invalidate the current session and to know
+// exactly which session that was - to key a best-effort cleanup (e.g.
+// notification-service device data) off it afterward - must use this
+// rather than a separate read-then-Deactivate: two round trips would race
+// a session concurrently activated in between, risking either reporting a
+// stale id or clearing a session that isn't the one just read. This uses
+// the same single-Lua-script technique ActivateAndReturnPreviousWithGeneration
+// already relies on for the same reason.
+//
+// Returns hadPrevious=false, with no error, if no session was active -
+// this is the safe, idempotent, well-defined outcome of calling it against
+// an account with nothing to deactivate (or calling it again after it
+// already cleared the marker), not an error case. It does not touch the
+// session-generation counter: that only matters to a newly-*issued*
+// token's "sg" claim, which this operation never issues.
+func (s *Store) DeactivateAndReturnPrevious(ctx context.Context, userID uuid.UUID) (uuid.UUID, bool, error) {
+	const script = `
+		local old = redis.call('GET', KEYS[1])
+		if old then redis.call('DEL', KEYS[1]) end
+		return old or ''
+	`
+	result, err := s.client.Eval(ctx, script, []string{activeSessionKey(userID)}).Result()
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("sessionstore: deactivate session for user %s: %w", userID, err)
+	}
+
+	oldString, _ := result.(string)
+	if oldString == "" {
+		return uuid.Nil, false, nil
+	}
+
+	previous, err := uuid.Parse(oldString)
+	if err != nil {
+		// Unlike ActivateAndReturnPreviousWithGeneration (which is
+		// mid-way through establishing a *new* session when it hits
+		// this, so silently proceeding as "no previous" is the safer
+		// choice there), this call's entire purpose is reporting which
+		// session was removed - a value already in Redis that isn't a
+		// valid session id is a real problem the caller must not mistake
+		// for "nothing was active".
+		return uuid.Nil, false, fmt.Errorf("sessionstore: parse active session id for user %s: %w", userID, err)
+	}
+	return previous, true, nil
+}
+
 // IsActive reports whether sessionID is still the active session for
 // userID. It returns false, with no error, once the marker has expired or
 // was never set - callers should treat that the same as "not active", not
